@@ -3,11 +3,14 @@ import { atualizarStatusPedido } from '../db/consultas';
 import { esperarBanco, fecharPool } from '../db/pool';
 import { migrar } from '../db/migracao';
 import { consumirPedido, criarConexaoRedis } from '../fila/fila';
-import { log } from '../telemetria/log';
-import { TIPO_DE_CONTEUDO, coletar } from '../telemetria/metricas';
+import { ROOT_CONTEXT, SpanKind, propagation, trace } from '@opentelemetry/api';
+import { log, registrarNoSpan } from '../telemetria/log';
+import { TIPO_DE_CONTEUDO, coletar, pedidosConfirmados } from '../telemetria/metricas';
 import { decidirStatusDoPedido } from './conciliacao';
 
 const porta = Number(process.env.WORKER_PORT ?? process.env.PORT ?? 8081);
+
+const tracer = trace.getTracer('loja-pedidos');
 
 let rodando = true;
 
@@ -41,12 +44,43 @@ async function processarMensagem(mensagem: Record<string, unknown>): Promise<voi
   const clienteId = String(mensagem.cliente_id);
   const valorTotal = Number(mensagem.valor_total);
 
-  log.info('mensagem do pedido ' + pedidoId + ' recebida da fila');
+  // continua o trace da api: extrai sobre um contexto raiz, nao sobre o ativo do worker
+  const contextoPai = propagation.extract(
+    ROOT_CONTEXT,
+    (mensagem.contexto_trace ?? {}) as Record<string, string>
+  );
 
-  const status = await decidirStatusDoPedido(clienteId, valorTotal);
-  await atualizarStatusPedido(pedidoId, status);
+  await tracer.startActiveSpan(
+    'pedido.processar',
+    {
+      kind: SpanKind.CONSUMER,
+      attributes: {
+        'pedido.id': pedidoId,
+        'pedido.cliente_id': clienteId,
+        'pedido.valor_total': valorTotal,
+      },
+    },
+    contextoPai,
+    async (span) => {
+      try {
+        log.info('mensagem do pedido ' + pedidoId + ' recebida da fila', pedidoId);
 
-  log.info('pedido ' + pedidoId + ' ficou ' + status);
+        const status = await decidirStatusDoPedido(clienteId, valorTotal, pedidoId);
+        await atualizarStatusPedido(pedidoId, status);
+        if (status === 'confirmado') {
+          pedidosConfirmados.inc();
+        }
+        span.setAttribute('pedido.status', status);
+
+        log.info('pedido ' + pedidoId + ' ficou ' + status, pedidoId);
+      } catch (erro) {
+        registrarNoSpan(erro);
+        throw erro;
+      } finally {
+        span.end();
+      }
+    }
+  );
 }
 
 async function iniciar(): Promise<void> {

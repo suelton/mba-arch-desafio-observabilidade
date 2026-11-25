@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { esperarBanco, fecharPool } from '../db/pool';
 import { migrar } from '../db/migracao';
 import { criarConexaoRedis } from '../fila/fila';
-import { log } from '../telemetria/log';
+import { log, registrarExcecao } from '../telemetria/log';
 import { medirRequisicoes } from './metricas-http';
 import { criarRotas } from './rotas';
 
@@ -21,7 +21,7 @@ async function iniciar(): Promise<void> {
 
   aplicacao.use(
     (erro: Error, _requisicao: Request, resposta: Response, _proximo: NextFunction) => {
-      log.error('erro ao atender requisicao: ' + erro.message);
+      registrarExcecao(erro, 'erro ao atender requisicao');
       resposta.status(500).json({ erro: 'erro interno' });
     }
   );

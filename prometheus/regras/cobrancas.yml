@@ -1,0 +1,24 @@
+groups:
+  - name: cobrancas
+    rules:
+      # SLI: fracao de cobrancas que nao falharam (recusada e resultado de negocio legitimo)
+      - record: sli:cobrancas_sem_falha:ratio_rate2m
+        expr: |
+          sum(rate(cobrancas_processadas_total{resultado!="falha"}[2m]))
+          /
+          sum(rate(cobrancas_processadas_total[2m]))
+
+      # SLO 99% em 30d => budget 1%. Limiar = 14,4 x 1% = 14,4% de falha (burn rate 14,4: gasta 2% do budget em 1h).
+      # Guarda de volume: com menos de 20 cobrancas em 2m a proporcao e ruido (1 falha em 2 pedidos = 50%).
+      - alert: FalhaEmCobrancas
+        expr: |
+          (1 - sli:cobrancas_sem_falha:ratio_rate2m) > 14.4 * (1 - 0.99)
+          and
+          sum(increase(cobrancas_processadas_total[2m])) >= 20
+        for: 45s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Falha em cobrancas acima do limiar do SLO"
+          description: "{{ $value | humanizePercentage }} das cobrancas falharam nos ultimos 2m (limiar 14,4%, burn rate 14,4 do SLO 99%/30d). Pedidos podem estar confirmados sem cobranca."
+
